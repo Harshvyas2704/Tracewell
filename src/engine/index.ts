@@ -2,19 +2,25 @@ import { createClock } from "./core/clock";
 import { ENGINE_CONFIG } from "./core/config";
 import { createRecorder } from "./core/recorder";
 import { createRng } from "./core/rng";
-import { runHandler } from "./core/runner";
+import { runRequest } from "./core/runner";
 import type { SimulationInput, SimulationResult } from "./core/types";
 import { createDatabase, snapshotDatabase } from "./db/database";
+import { requestPipeline } from "./http/pipeline";
 import { computeMetrics } from "./metrics";
 
-export { delay, log } from "./core/effects";
-export { ENGINE_CONFIG } from "./core/config";
+export { lineOf, scenarioCode } from "./core/code";
+export { COST_CONFIG, ENGINE_CONFIG } from "./core/config";
+export { delay, log, trace } from "./core/effects";
 export type * from "./core/types";
 export type { Rng } from "./core/rng";
-export { COST_CONFIG } from "./db/cost";
 export { db } from "./db/effects";
 export { DbError, isDbError } from "./db/errors";
 export type * from "./db/types";
+export { fakeJwt, requireAuth } from "./http/auth";
+export { HttpError } from "./http/errors";
+export { createRequest } from "./http/request";
+export { statusLabel } from "./http/response";
+export { validateBody } from "./http/validate";
 
 // Public engine API. Same scenario + requests + fixes + seed always gives the
 // same result.
@@ -32,9 +38,10 @@ export function runSimulation(input: SimulationInput): SimulationResult {
   const recorder = createRecorder();
   // A fresh database per run: one simulation never leaks into the next.
   const database = createDatabase(scenario.world ?? []);
-  const outcome = runHandler({
-    handler: scenario.handler,
-    ctx: { req, fixes, rng: createRng(seed) },
+  const rng = createRng(seed);
+  const outcome = runRequest({
+    requestId: req.id,
+    start: () => requestPipeline({ scenario, req, fixes, rng }),
     clock,
     recorder,
     database,

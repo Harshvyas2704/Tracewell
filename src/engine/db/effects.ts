@@ -3,6 +3,7 @@ import type { DeleteQuery, Query, Row, SelectQuery, UpdateQuery } from "./types"
 export type DbEffectMeta = {
   line?: number; // display code line
   label?: string; // trace label, defaults to e.g. "SELECT products"
+  groupKey?: string; // consecutive events with the same key collapse in the trace
 };
 
 export type DbEffect = { kind: "db"; query: Query } & DbEffectMeta;

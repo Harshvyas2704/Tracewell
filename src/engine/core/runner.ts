@@ -1,17 +1,10 @@
-import { isDbError } from "../db/errors";
 import { executeQuery } from "../db/execute";
 import { toSql } from "../db/sql";
 import type { Database } from "../db/types";
-import type { Clock } from "./clock";
+import { roundMs, type Clock } from "./clock";
 import { ENGINE_CONFIG } from "./config";
 import type { Recorder } from "./recorder";
-import type {
-  Effect,
-  Handler,
-  HandlerContext,
-  SimError,
-  SimResponse,
-} from "./types";
+import type { Effect, SimError, SimResponse } from "./types";
 
 export type RunOutcome = {
   response: SimResponse;
@@ -19,8 +12,9 @@ export type RunOutcome = {
 };
 
 type RunArgs = {
-  handler: Handler;
-  ctx: HandlerContext;
+  requestId: string;
+  // The whole request (pipeline, middlewares, handler) as one generator.
+  start: () => Generator<Effect, SimResponse, unknown>;
   clock: Clock;
   recorder: Recorder;
   database: Database;
@@ -29,41 +23,42 @@ type RunArgs = {
 // What the generator is resumed with: a value, or an error thrown at the yield.
 type EffectResult = { value: unknown } | { error: Error };
 
-const EMPTY_OK: SimResponse = { status: 200, headers: {}, body: null };
+// The most recent failed event. It explains an error response.
+type Failure = { code: string; message: string; eventSeq: number };
 
-// Drives one handler to completion: runs each yielded effect, records its
+type EffectEnv = RunArgs & { onFailure(failure: Failure): void };
+
+// Drives one request to completion: runs each yielded effect, records its
 // event, advances the clock, and resumes the generator with the result.
-export function runHandler(args: RunArgs): RunOutcome {
-  const { handler, ctx, clock, recorder } = args;
-  const requestId = ctx.req.id;
+export function runRequest(args: RunArgs): RunOutcome {
+  const { requestId, clock, recorder } = args;
+  let failure: Failure | undefined;
+  const env: EffectEnv = { ...args, onFailure: (f) => (failure = f) };
 
-  const fail = (type: string, message: string, code = type): RunOutcome => {
+  // Stops the simulation itself. No response is sent.
+  const abort = (code: string, message: string): RunOutcome => {
     const event = recorder.record({
       requestId,
       stage: "error",
-      type,
+      type: code,
       label: message,
       startTime: clock.now(),
       duration: 0,
       status: "fail",
     });
     return {
-      response: {
-        status: 500,
-        headers: {},
-        body: { error: "Internal Server Error" },
-      },
+      response: { status: 500, headers: {}, body: { error: "Internal Server Error" } },
       error: { status: 500, code, message, requestId, eventSeq: event.seq },
     };
   };
 
   try {
-    const gen = handler(ctx);
+    const gen = args.start();
     let steps = 0;
     let step = gen.next();
     while (!step.done) {
       if (steps >= ENGINE_CONFIG.maxSteps) {
-        return fail(
+        return abort(
           "ENGINE_STEP_LIMIT",
           `Simulation stopped after ${ENGINE_CONFIG.maxSteps} steps`,
         );
@@ -71,36 +66,54 @@ export function runHandler(args: RunArgs): RunOutcome {
       steps += 1;
       const problem = effectProblem(step.value);
       if (problem) {
-        return fail("ENGINE_INVALID_EFFECT", problem);
+        return abort("ENGINE_INVALID_EFFECT", problem);
       }
-      const result = runEffect(step.value, args);
+      const result = runEffect(step.value, env);
       step = "error" in result ? gen.throw(result.error) : gen.next(result.value);
     }
-    return { response: step.value ?? EMPTY_OK };
+
+    const response = step.value;
+    if (response.status < 400) return { response };
+    return {
+      response,
+      error: {
+        status: response.status,
+        code: failure?.code ?? `HTTP_${response.status}`,
+        message: failure?.message ?? errorText(response.body) ?? `HTTP ${response.status}`,
+        requestId,
+        eventSeq: failure?.eventSeq ?? recorder.events.length - 1,
+      },
+    };
   } catch (err) {
-    if (isDbError(err)) {
-      return fail("UNHANDLED_DB_ERROR", err.message, err.code);
-    }
-    return fail("HANDLER_ERROR", err instanceof Error ? err.message : String(err));
+    // The pipeline handles handler errors itself, so this is an engine bug.
+    return abort("ENGINE_INTERNAL_ERROR", err instanceof Error ? err.message : String(err));
   }
 }
 
+function errorText(body: unknown): string | undefined {
+  const error = (body as { error?: unknown } | null)?.error;
+  return typeof error === "string" ? error : undefined;
+}
+
+function isDuration(ms: unknown): boolean {
+  return typeof ms === "number" && Number.isFinite(ms) && ms >= 0;
+}
+
 function effectProblem(effect: Effect): string | undefined {
-  const kind = (effect as { kind?: unknown } | null | undefined)?.kind;
+  const { kind, ms } = (effect ?? {}) as { kind?: unknown; ms?: unknown };
   if (kind === "log" || kind === "db") return undefined;
-  if (kind === "delay") {
-    const { ms } = effect as { ms: unknown };
-    return typeof ms === "number" && Number.isFinite(ms) && ms >= 0
-      ? undefined
-      : `delay effect has invalid duration: ${String(ms)}`;
+  if (kind === "delay" || kind === "trace") {
+    if (kind === "trace" && ms === undefined) return undefined;
+    return isDuration(ms) ? undefined : `${kind} effect has invalid duration: ${String(ms)}`;
   }
   return `Handler yielded an unknown effect: ${String(kind)}`;
 }
 
-function runEffect(effect: Effect, args: RunArgs): EffectResult {
-  const { ctx, clock, recorder, database } = args;
-  const requestId = ctx.req.id;
+function runEffect(effect: Effect, env: EffectEnv): EffectResult {
+  const { requestId, clock, recorder, database } = env;
   const line = effect.line !== undefined && { line: effect.line };
+  const group =
+    "groupKey" in effect && effect.groupKey !== undefined && { groupKey: effect.groupKey };
   switch (effect.kind) {
     case "delay":
       recorder.record({
@@ -109,7 +122,7 @@ function runEffect(effect: Effect, args: RunArgs): EffectResult {
         type: "DELAY",
         label: effect.label,
         startTime: clock.now(),
-        duration: effect.ms,
+        duration: roundMs(effect.ms),
         status: "ok",
         ...line,
       });
@@ -127,11 +140,37 @@ function runEffect(effect: Effect, args: RunArgs): EffectResult {
         ...line,
       });
       return { value: undefined };
+    case "trace": {
+      const duration = roundMs(effect.ms ?? 0);
+      const event = recorder.record({
+        requestId,
+        stage: effect.stage,
+        type: effect.type,
+        label: effect.label,
+        startTime: clock.now(),
+        duration,
+        status: effect.status ?? "ok",
+        ...line,
+        // Copied, so the snapshot keeps the data as it was at this moment.
+        ...(effect.snapshot !== undefined && { snapshot: structuredClone(effect.snapshot) }),
+        ...group,
+      });
+      // A failed response event reports an error, it does not cause one.
+      if (event.status === "fail" && effect.stage !== "response") {
+        env.onFailure({
+          code: effect.code ?? effect.type,
+          message: effect.label,
+          eventSeq: event.seq,
+        });
+      }
+      clock.advance(duration);
+      return { value: undefined };
+    }
     case "db": {
       const { query } = effect;
       const result = executeQuery(database, query);
       const { error } = result;
-      recorder.record({
+      const event = recorder.record({
         requestId,
         stage: "db",
         type: "SQL_QUERY",
@@ -140,15 +179,16 @@ function runEffect(effect: Effect, args: RunArgs): EffectResult {
         duration: result.duration,
         status: error ? "fail" : "ok",
         ...line,
-        ...(error && {
-          snapshot: {
-            error: { code: error.code, message: error.message, detail: error.detail },
-          },
-        }),
+        snapshot: error
+          ? { error: { code: error.code, message: error.message, detail: error.detail } }
+          : { rows: result.rows.slice(0, ENGINE_CONFIG.snapshotRowLimit) },
         sql: { ...toSql(query), ...result.stats },
+        ...group,
       });
       clock.advance(result.duration);
-      return error ? { error } : { value: result.rows };
+      if (!error) return { value: result.rows };
+      env.onFailure({ code: error.code, message: error.message, eventSeq: event.seq });
+      return { error };
     }
   }
 }

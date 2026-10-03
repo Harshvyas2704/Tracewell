@@ -12,6 +12,8 @@ export default tseslint.config(
     languageOptions: { globals: globals.browser },
     plugins: { "react-hooks": reactHooks },
     rules: {
+      // A handler that only returns a response is still a generator.
+      "require-yield": "off",
       "react-hooks/rules-of-hooks": "error",
       "react-hooks/exhaustive-deps": "warn",
     },

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  createRequest,
   db,
   delay,
   ENGINE_CONFIG,
@@ -10,29 +11,25 @@ import {
   type Handler,
   type Row,
   type Scenario,
-  type SimRequest,
+  type SimulationResult,
   type TableDef,
 } from "./index";
 
-const request = (overrides: Partial<SimRequest> = {}): SimRequest => ({
-  id: "r1",
-  method: "GET",
-  path: "/",
-  query: {},
-  headers: {},
-  body: null,
-  startAt: 0,
-  ...overrides,
-});
+const request = (startAt = 0) => createRequest({ method: "GET", path: "/", startAt });
 
-const scenario = (handler: Handler): Scenario => ({
+const scenario = (handler: Handler, world?: TableDef[]): Scenario => ({
   id: "test",
   name: "Test",
-  handler,
+  world,
+  routes: [{ method: "GET", path: "/", handler }],
 });
 
-const run = (handler: Handler, seed?: number, req = request()) =>
-  runSimulation({ scenario: scenario(handler), requests: [req], seed });
+const run = (handler: Handler, seed?: number, startAt?: number) =>
+  runSimulation({ scenario: scenario(handler), requests: [request(startAt)], seed });
+
+const types = (result: SimulationResult) => result.events.map((e) => e.type);
+const inController = (result: SimulationResult) =>
+  result.events.filter((e) => e.stage === "controller");
 
 describe("runSimulation", () => {
   it("records three effects as three events in order with virtual times", () => {
@@ -42,32 +39,42 @@ describe("runSimulation", () => {
       yield delay(10, "work", 3);
     });
 
-    expect(result.events).toEqual([
-      { seq: 0, requestId: "r1", stage: "controller", type: "DELAY", label: "parse", startTime: 0, duration: 5, status: "ok", line: 1 },
-      { seq: 1, requestId: "r1", stage: "controller", type: "LOG", label: "checkpoint", startTime: 5, duration: 0, status: "ok", line: 2 },
-      { seq: 2, requestId: "r1", stage: "controller", type: "DELAY", label: "work", startTime: 5, duration: 10, status: "ok", line: 3 },
+    expect(types(result)).toEqual([
+      "REQUEST_RECEIVED",
+      "BODY_PARSE_SKIPPED",
+      "ROUTE_MATCHED",
+      "DELAY",
+      "LOG",
+      "DELAY",
+      "RESPONSE_SENT",
     ]);
-    expect(result.metrics.totalTime).toBe(15);
+    expect(result.events.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+
+    const events = inController(result);
+    const start = events[0]?.startTime ?? 0;
+    expect(events).toEqual([
+      { seq: 3, requestId: "r1", stage: "controller", type: "DELAY", label: "parse", startTime: start, duration: 5, status: "ok", line: 1 },
+      { seq: 4, requestId: "r1", stage: "controller", type: "LOG", label: "checkpoint", startTime: start + 5, duration: 0, status: "ok", line: 2 },
+      { seq: 5, requestId: "r1", stage: "controller", type: "DELAY", label: "work", startTime: start + 5, duration: 10, status: "ok", line: 3 },
+    ]);
+    expect(result.events.at(-1)?.startTime).toBe(start + 15);
     expect(result.errors).toEqual([]);
     expect(result.responses.r1).toEqual({ status: 200, headers: {}, body: null });
   });
 
   it("starts the clock at the request's startAt", () => {
-    const result = run(
-      function* () {
-        yield delay(5, "work");
-      },
-      undefined,
-      request({ startAt: 100 }),
-    );
-    expect(result.events[0]?.startTime).toBe(100);
-    expect(result.metrics.totalTime).toBe(5);
+    const handler: Handler = function* () {
+      yield delay(5, "work");
+    };
+    const late = run(handler, undefined, 100);
+    expect(late.events[0]?.startTime).toBe(100);
+    expect(late.metrics.totalTime).toBe(run(handler).metrics.totalTime);
   });
 
   it("returns the response the handler returns", () => {
-    const result = run(function* () {
+    const result = run(function* (ctx) {
       yield log("found");
-      return { status: 201, headers: { "content-type": "application/json" }, body: { id: 1 } };
+      return ctx.res.status(201).json({ id: 1 });
     });
     expect(result.responses.r1).toEqual({
       status: 201,
@@ -81,7 +88,7 @@ describe("runSimulation", () => {
       for (let i = 0; i < 5; i++) {
         yield delay(ctx.rng.int(1, 50), `step ${i}`, i);
       }
-      return { status: 200, headers: {}, body: { roll: ctx.rng.next() } };
+      return ctx.res.json({ roll: ctx.rng.next() });
     };
     const first = run(handler, 123);
     const second = run(handler, 123);
@@ -112,24 +119,22 @@ describe("runSimulation", () => {
     expect(result.responses.r1?.status).toBe(500);
   });
 
-  it("turns a thrown error into an error event and a 500", () => {
+  it("turns a thrown error into a 500 without leaking the message", () => {
     const result = run(function* () {
       yield delay(3, "before");
       throw new Error("boom");
     });
 
-    expect(result.events).toHaveLength(2);
-    expect(result.events[1]).toMatchObject({
-      stage: "error",
-      type: "HANDLER_ERROR",
-      label: "boom",
-      startTime: 3,
-      status: "fail",
-    });
+    expect(types(result).slice(-3)).toEqual(["DELAY", "ERROR_HANDLED", "RESPONSE_SENT"]);
+    const handled = result.events.at(-2);
+    expect(handled).toMatchObject({ stage: "error", label: "boom", status: "fail" });
     expect(result.errors).toEqual([
-      { status: 500, code: "HANDLER_ERROR", message: "boom", requestId: "r1", eventSeq: 1 },
+      { status: 500, code: "INTERNAL_ERROR", message: "boom", requestId: "r1", eventSeq: handled?.seq },
     ]);
-    expect(result.responses.r1?.status).toBe(500);
+    expect(result.responses.r1).toMatchObject({
+      status: 500,
+      body: { error: "Internal Server Error" },
+    });
   });
 
   it("ends the run when a handler yields something that is not a valid effect", () => {
@@ -142,7 +147,7 @@ describe("runSimulation", () => {
       yield delay(-5, "back in time");
     });
     expect(negative.errors[0]?.code).toBe("ENGINE_INVALID_EFFECT");
-    expect(negative.events).toHaveLength(1);
+    expect(negative.events.at(-1)?.type).toBe("ENGINE_INVALID_EFFECT");
   });
 
   it("rejects runs that do not have exactly one request", () => {
@@ -151,7 +156,7 @@ describe("runSimulation", () => {
     expect(() =>
       runSimulation({
         scenario: scenario(handler),
-        requests: [request(), request({ id: "r2" })],
+        requests: [request(), createRequest({ id: "r2", method: "GET", path: "/" })],
       }),
     ).toThrow();
   });
@@ -175,33 +180,34 @@ describe("database effects", () => {
   };
 
   const runDb = (handler: Handler) =>
-    runSimulation({
-      scenario: { id: "db", name: "DB", world: [users], handler },
-      requests: [request()],
-    });
+    runSimulation({ scenario: scenario(handler, [users]), requests: [request()] });
+  const queries = (result: SimulationResult) =>
+    result.events.filter((e) => e.type === "SQL_QUERY");
 
   it("resumes the handler with rows and records a SQL_QUERY event", () => {
-    const result = runDb(function* () {
+    const result = runDb(function* (ctx) {
       const rows: Row[] = yield db.select("users", { where: { id: 7 } }, { line: 4 });
       const all: Row[] = yield db.select("users", { where: { role: "user" } }, { line: 5 });
-      return { status: 200, headers: {}, body: { user: rows[0], total: all.length } };
+      return ctx.res.json({ user: rows[0], total: all.length });
     });
 
     expect(result.responses.r1?.body).toEqual({
       user: { id: 7, email: "user7@example.com", role: "user" },
       total: 100,
     });
-    expect(result.events).toHaveLength(2);
-    expect(result.events[0]).toEqual({
-      seq: 0,
+    const [first, second] = queries(result);
+    expect(queries(result)).toHaveLength(2);
+    expect(first).toEqual({
+      seq: 3,
       requestId: "r1",
       stage: "db",
       type: "SQL_QUERY",
       label: "SELECT users",
-      startTime: 0,
+      startTime: 0.12,
       duration: 1.05,
       status: "ok",
       line: 4,
+      snapshot: { rows: [{ id: 7, email: "user7@example.com", role: "user" }] },
       sql: {
         text: "SELECT * FROM users WHERE id = $1",
         params: [7],
@@ -213,62 +219,112 @@ describe("database effects", () => {
         rowsWritten: 0,
       },
     });
-    expect(result.events[1]).toMatchObject({
-      startTime: 1.05,
+    expect((second?.snapshot as { rows: Row[] }).rows).toHaveLength(ENGINE_CONFIG.snapshotRowLimit);
+    expect(second).toMatchObject({
+      startTime: 1.17,
       duration: 2.5,
       sql: { plan: "Seq Scan", rowsScanned: 100, rowsReturned: 100 },
     });
-    expect(result.metrics.totalTime).toBe(3.55);
+  });
+
+  it("counts queries and rows in the metrics, from events only", () => {
+    const result = runDb(function* () {
+      yield db.select("users", { where: { id: 7 } });
+      yield db.select("users", { where: { role: "user" } });
+      yield db.select("users", { where: { email: "nobody@example.com" } });
+    });
+    expect(result.metrics).toMatchObject({
+      sqlQueries: 3,
+      rowsScanned: 8 + 100 + 7,
+      rowsReturned: 1 + 100 + 0,
+    });
+    expect(run(function* () {}).metrics).toMatchObject({ sqlQueries: 0, rowsScanned: 0, rowsReturned: 0 });
+  });
+
+  it("passes fixes to the handler", () => {
+    const handler: Handler = function* (ctx) {
+      return ctx.res.json({ fast: ctx.fixes.fast === true });
+    };
+    const off = runSimulation({ scenario: scenario(handler), requests: [request()] });
+    const on = runSimulation({ scenario: scenario(handler), requests: [request()], fixes: { fast: true } });
+    expect([off.responses.r1?.body, on.responses.r1?.body]).toEqual([{ fast: false }, { fast: true }]);
+  });
+
+  it("copies a groupKey from the effect to its event", () => {
+    const result = runDb(function* () {
+      for (const id of [1, 2, 3]) {
+        yield db.select("users", { where: { id } }, { groupKey: "users-by-id" });
+      }
+      yield db.select("users", { where: { id: 4 } });
+    });
+    expect(queries(result).map((e) => e.groupKey)).toEqual([
+      "users-by-id",
+      "users-by-id",
+      "users-by-id",
+      undefined,
+    ]);
   });
 
   it("lets a handler catch a unique violation", () => {
-    const result = runDb(function* () {
+    const result = runDb(function* (ctx) {
       try {
         yield db.insert("users", { email: "user1@example.com", role: "user" }, { line: 2 });
       } catch (err) {
         if (isDbError(err) && err.code === "23505") {
-          return { status: 409, headers: {}, body: { error: "Email already used" } };
+          return ctx.res.status(409).json({ error: "Email already used" });
         }
         throw err;
       }
     });
 
     expect(result.responses.r1?.status).toBe(409);
-    expect(result.errors).toEqual([]);
-    expect(result.events).toHaveLength(1);
-    expect(result.events[0]).toMatchObject({
-      type: "SQL_QUERY",
+    expect(types(result).slice(-2)).toEqual(["SQL_QUERY", "RESPONSE_SENT"]);
+    const [insert] = queries(result);
+    expect(insert).toMatchObject({
       status: "fail",
       snapshot: { error: { code: "23505" } },
       sql: { text: "INSERT INTO users (email, role) VALUES ($1, $2) RETURNING *" },
     });
+    expect(result.errors).toEqual([
+      expect.objectContaining({ status: 409, code: "23505", eventSeq: insert?.seq }),
+    ]);
     expect(result.worldAfter.tables.users).toHaveLength(100);
   });
 
-  it("ends the run with the Postgres code when a database error is not caught", () => {
-    const result = runDb(function* () {
+  it("maps an uncaught unique violation to 409 and other database errors to 500", () => {
+    const duplicate = runDb(function* () {
+      yield db.insert("users", { email: "user1@example.com", role: "user" });
+    });
+    expect(types(duplicate).slice(-3)).toEqual(["SQL_QUERY", "ERROR_HANDLED", "RESPONSE_SENT"]);
+    expect(duplicate.responses.r1).toMatchObject({
+      status: 409,
+      body: {
+        error: "Resource already exists",
+        detail: "Key (email)=(user1@example.com) already exists.",
+      },
+    });
+    expect(duplicate.errors[0]).toMatchObject({ status: 409, code: "23505" });
+
+    const missing = runDb(function* () {
       yield db.insert("users", { email: "new@example.com" });
     });
-
-    expect(result.responses.r1?.status).toBe(500);
-    expect(result.errors).toEqual([
-      {
-        status: 500,
-        code: "23502",
-        message: expect.stringContaining("not-null"),
-        requestId: "r1",
-        eventSeq: 1,
-      },
-    ]);
-    expect(result.events.map((e) => e.type)).toEqual(["SQL_QUERY", "UNHANDLED_DB_ERROR"]);
+    expect(missing.responses.r1).toMatchObject({
+      status: 500,
+      body: { error: "Internal Server Error" },
+    });
+    expect(missing.errors[0]).toMatchObject({
+      status: 500,
+      code: "23502",
+      message: expect.stringContaining("not-null"),
+    });
   });
 
   it("returns the final rows in worldAfter and starts every run from the seed data", () => {
-    const handler: Handler = function* () {
+    const handler: Handler = function* (ctx) {
       const [created]: Row[] = yield db.insert("users", { email: "new@example.com", role: "admin" });
       yield db.update("users", { set: { role: "banned" }, where: { id: 1 } });
       yield db.delete("users", { where: { id: 2 } });
-      return { status: 201, headers: {}, body: created };
+      return ctx.res.status(201).json(created);
     };
     const first = runDb(handler);
     const second = runDb(handler);

@@ -1,12 +1,7 @@
-// Cost model. These constants are model parameters chosen to make the shape
-// of the work visible. They are not benchmarks of a real PostgreSQL server.
-export const COST_CONFIG = {
-  baseMs: 1, // round trip, parse and plan
-  perRowScanMs: 0.005,
-  perRowSentMs: 0.01,
-  perSortCompareMs: 0.002, // multiplied by n * log2(n)
-  perRowWriteMs: 0.1,
-};
+import { roundMs } from "../core/clock";
+import { COST_CONFIG } from "../core/config";
+
+export { COST_CONFIG };
 
 export type Work = {
   rowsScanned: number;
@@ -18,10 +13,6 @@ export type Work = {
 // Steps to find one key in an index over n rows.
 export function indexDepth(n: number): number {
   return n === 0 ? 0 : Math.max(1, Math.ceil(Math.log2(n)));
-}
-
-export function roundMs(ms: number): number {
-  return Math.round(ms * 1000) / 1000;
 }
 
 export function queryDuration(work: Work): number {
