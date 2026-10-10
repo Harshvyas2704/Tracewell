@@ -1,8 +1,13 @@
-import type { Fixes, Scenario } from "./types";
+import type { Fixes, PerFixes, Scenario } from "./types";
+
+// Resolves a part of a scenario for the fixes that are on.
+export function withFixes<T>(value: PerFixes<T>, fixes: Fixes): T {
+  return typeof value === "function" ? (value as (fixes: Fixes) => T)(fixes) : value;
+}
 
 // The display code of a scenario with the given fixes switched on.
 export function scenarioCode(scenario: Scenario, fixes: Fixes = {}): string | undefined {
-  return typeof scenario.code === "function" ? scenario.code(fixes) : scenario.code;
+  return withFixes(scenario.code, fixes);
 }
 
 // Finds the 1-based line of display code that contains a snippet, so handlers

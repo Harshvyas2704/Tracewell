@@ -2,8 +2,9 @@ import type { HttpMethod, Route } from "../core/types";
 
 export type RouteMatch =
   | { type: "found"; route: Route; params: Record<string, string> }
-  | { type: "wrong-method"; allowed: HttpMethod[] } // the path exists, the method does not
-  | { type: "not-found" };
+  // otherMethods lists the methods this path does exist under. Express answers
+  // 404 either way, so this is only a hint for the trace.
+  | { type: "not-found"; otherMethods: HttpMethod[] };
 
 const segments = (path: string) => path.split("/").filter(Boolean);
 
@@ -39,12 +40,12 @@ function safeDecode(value: string): string {
 
 // The first route that matches wins, like Express.
 export function matchRoute(routes: Route[], method: HttpMethod, path: string): RouteMatch {
-  const allowed: HttpMethod[] = [];
+  const otherMethods: HttpMethod[] = [];
   for (const route of routes) {
     const params = matchPath(route.path, path);
     if (!params) continue;
     if (route.method === method) return { type: "found", route, params };
-    if (!allowed.includes(route.method)) allowed.push(route.method);
+    if (!otherMethods.includes(route.method)) otherMethods.push(route.method);
   }
-  return allowed.length > 0 ? { type: "wrong-method", allowed } : { type: "not-found" };
+  return { type: "not-found", otherMethods };
 }

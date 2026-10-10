@@ -1,7 +1,8 @@
 import { useState } from "react";
 import type { SimEvent, SqlInfo } from "../../engine";
-import { formatJson, formatMs } from "../format";
+import { formatJson, formatMs, formatMsFixed } from "../format";
 import { StatusIcon, statusText } from "../trace";
+import { costLines } from "./costLines";
 import { DataFlow } from "./DataFlow";
 
 type Props = {
@@ -70,7 +71,7 @@ function StepDetails({ event }: { event: SimEvent }) {
         )}
       </dl>
 
-      {event.sql && <SqlBlock sql={event.sql} />}
+      {event.sql && <SqlBlock sql={event.sql} duration={event.duration} />}
 
       {event.snapshot !== undefined && (
         <>
@@ -84,7 +85,7 @@ function StepDetails({ event }: { event: SimEvent }) {
   );
 }
 
-function SqlBlock({ sql }: { sql: SqlInfo }) {
+function SqlBlock({ sql, duration }: { sql: SqlInfo; duration: number }) {
   return (
     <>
       <h3>SQL</h3>
@@ -118,6 +119,24 @@ function SqlBlock({ sql }: { sql: SqlInfo }) {
           </>
         )}
       </dl>
+
+      <h3>Where the time goes</h3>
+      <table className="cost-table">
+        <tbody>
+          {costLines(sql).map((line) => (
+            <tr key={line.label}>
+              <th scope="row">{line.label}</th>
+              <td className="cost-formula">{line.formula && `${line.formula} =`}</td>
+              <td className="cost-ms">{formatMsFixed(line.ms)}</td>
+            </tr>
+          ))}
+          <tr className="cost-total">
+            <th scope="row">Total</th>
+            <td />
+            <td className="cost-ms">{formatMsFixed(duration)}</td>
+          </tr>
+        </tbody>
+      </table>
     </>
   );
 }

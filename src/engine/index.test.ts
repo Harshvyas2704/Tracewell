@@ -7,6 +7,7 @@ import {
   isDbError,
   log,
   runSimulation,
+  scenarioCode,
   type Effect,
   type Handler,
   type Row,
@@ -217,6 +218,7 @@ describe("database effects", () => {
         rowsReturned: 1,
         rowsSorted: 0,
         rowsWritten: 0,
+        cost: { baseMs: 1, scanMs: 0.04, sentMs: 0.01, writeMs: 0, sortMs: 0 },
       },
     });
     expect((second?.snapshot as { rows: Row[] }).rows).toHaveLength(ENGINE_CONFIG.snapshotRowLimit);
@@ -250,6 +252,38 @@ describe("database effects", () => {
     expect([off.responses.r1?.body, on.responses.r1?.body]).toEqual([{ fast: false }, { fast: true }]);
   });
 
+  it("resolves world, routes, lines and code for the fixes that are on", () => {
+    const table = (indexed: boolean): TableDef => ({ ...users, indexes: indexed ? ["role"] : [] });
+    const byRole: Handler = function* (ctx) {
+      const rows: Row[] = yield db.select("users", { where: { role: "user" } });
+      return ctx.res.json({ count: rows.length });
+    };
+    const perFixes: Scenario = {
+      id: "per-fixes",
+      name: "Per fixes",
+      world: (fixes) => [table(fixes.index === true)],
+      routes: (fixes) => [{ method: "GET", path: "/", handler: byRole, line: fixes.index ? 12 : 10 }],
+      lines: (fixes) => ({ bodyParser: fixes.index ? 5 : 3 }),
+      code: (fixes) => (fixes.index ? "// with index" : "// without"),
+    };
+    const go = (fixes: Record<string, boolean>) =>
+      runSimulation({ scenario: perFixes, requests: [request()], fixes });
+    const off = go({});
+    const on = go({ index: true });
+
+    expect(queries(off)[0]?.sql?.plan).toBe("Seq Scan");
+    expect(queries(on)[0]?.sql).toMatchObject({ plan: "Index Scan", index: "role" });
+    expect(on.responses.r1).toEqual(off.responses.r1);
+    const line = (result: SimulationResult, type: string) =>
+      result.events.find((e) => e.type === type)?.line;
+    expect([line(off, "BODY_PARSE_SKIPPED"), line(off, "ROUTE_MATCHED")]).toEqual([3, 10]);
+    expect([line(on, "BODY_PARSE_SKIPPED"), line(on, "ROUTE_MATCHED")]).toEqual([5, 12]);
+    expect([scenarioCode(perFixes, {}), scenarioCode(perFixes, { index: true })]).toEqual([
+      "// without",
+      "// with index",
+    ]);
+  });
+
   it("copies a groupKey from the effect to its event", () => {
     const result = runDb(function* () {
       for (const id of [1, 2, 3]) {
@@ -265,30 +299,134 @@ describe("database effects", () => {
     ]);
   });
 
-  it("lets a handler catch a unique violation", () => {
-    const result = runDb(function* (ctx) {
-      try {
-        yield db.insert("users", { email: "user1@example.com", role: "user" }, { line: 2 });
-      } catch (err) {
-        if (isDbError(err) && err.code === "23505") {
-          return ctx.res.status(409).json({ error: "Email already used" });
+  describe("which event an error response points at", () => {
+    const duplicate = () => db.insert("users", { email: "user1@example.com", role: "user" }, { line: 2 });
+
+    it("marks a caught query error as handled and blames the response the handler chose", () => {
+      const result = runDb(function* (ctx) {
+        try {
+          yield duplicate();
+        } catch (err) {
+          if (isDbError(err) && err.code === "23505") {
+            return ctx.res.status(422).json({ error: "Email already used" });
+          }
+          throw err;
         }
-        throw err;
-      }
+      });
+
+      expect(result.responses.r1?.status).toBe(422);
+      expect(types(result).slice(-2)).toEqual(["SQL_QUERY", "RESPONSE_SENT"]);
+      const [insert] = queries(result);
+      expect(insert).toMatchObject({
+        status: "fail",
+        handled: true,
+        label: "INSERT users (caught)",
+        snapshot: { error: { code: "23505" } },
+        sql: { text: "INSERT INTO users (email, role) VALUES ($1, $2) RETURNING *" },
+      });
+      const sent = result.events.at(-1);
+      expect(result.errors).toEqual([
+        {
+          status: 422,
+          code: "UNPROCESSABLE_ENTITY",
+          message: "Email already used",
+          requestId: "r1",
+          eventSeq: sent?.seq,
+        },
+      ]);
+      expect(result.worldAfter.tables.users).toHaveLength(100);
     });
 
-    expect(result.responses.r1?.status).toBe(409);
-    expect(types(result).slice(-2)).toEqual(["SQL_QUERY", "RESPONSE_SENT"]);
-    const [insert] = queries(result);
-    expect(insert).toMatchObject({
-      status: "fail",
-      snapshot: { error: { code: "23505" } },
-      sql: { text: "INSERT INTO users (email, role) VALUES ($1, $2) RETURNING *" },
+    it("reports no error when the handler recovers and answers 200", () => {
+      const result = runDb(function* (ctx) {
+        try {
+          yield duplicate();
+        } catch {
+          const rows: Row[] = yield db.select("users", { where: { email: "user1@example.com" } });
+          return ctx.res.json(rows[0]);
+        }
+      });
+      expect(result.responses.r1?.status).toBe(200);
+      expect(result.errors).toEqual([]);
+      expect(queries(result).map((e) => [e.status, e.handled])).toEqual([
+        ["fail", true],
+        ["ok", undefined],
+      ]);
     });
-    expect(result.errors).toEqual([
-      expect.objectContaining({ status: 409, code: "23505", eventSeq: insert?.seq }),
-    ]);
-    expect(result.worldAfter.tables.users).toHaveLength(100);
+
+    it("points an uncaught query error at the failed query, not at the error handler", () => {
+      const result = runDb(function* () {
+        yield duplicate();
+      });
+      const [insert] = queries(result);
+      expect(types(result).slice(-3)).toEqual(["SQL_QUERY", "ERROR_HANDLED", "RESPONSE_SENT"]);
+      expect(insert?.handled).toBeUndefined();
+      expect(insert?.label).toBe("INSERT users");
+      expect(result.errors).toEqual([
+        {
+          status: 409,
+          code: "23505",
+          message: expect.stringContaining("duplicate key"),
+          requestId: "r1",
+          eventSeq: insert?.seq,
+        },
+      ]);
+    });
+
+    it("treats an error the handler catches and throws again as not handled", () => {
+      const result = runDb(function* () {
+        try {
+          yield duplicate();
+        } catch (err) {
+          yield log("cleaning up");
+          throw err;
+        }
+      });
+      const [insert] = queries(result);
+      // The same error reached the error handler in the end, so the query is
+      // the cause and is not marked as handled.
+      expect(result.responses.r1?.status).toBe(409);
+      expect(result.errors[0]).toMatchObject({ code: "23505", eventSeq: insert?.seq });
+      expect(insert).toMatchObject({ status: "fail", label: "INSERT users" });
+      expect(insert?.handled).toBeUndefined();
+    });
+
+    it("points at the error handler when the handler throws its own error", () => {
+      const result = runDb(function* () {
+        try {
+          yield duplicate();
+        } catch {
+          throw new Error("could not save user");
+        }
+      });
+      const handled = result.events.find((e) => e.type === "ERROR_HANDLED");
+      expect(queries(result)[0]?.handled).toBe(true);
+      expect(result.errors).toEqual([
+        {
+          status: 500,
+          code: "INTERNAL_ERROR",
+          message: "could not save user",
+          requestId: "r1",
+          eventSeq: handled?.seq,
+        },
+      ]);
+    });
+
+    it("derives the code from the status when the handler returns an error on purpose", () => {
+      const result = runDb(function* (ctx) {
+        const rows: Row[] = yield db.select("users", { where: { id: 999 } });
+        if (rows.length === 0) return ctx.res.status(404).json({ error: "User not found" });
+      });
+      expect(result.errors).toEqual([
+        {
+          status: 404,
+          code: "NOT_FOUND",
+          message: "User not found",
+          requestId: "r1",
+          eventSeq: result.events.at(-1)?.seq,
+        },
+      ]);
+    });
   });
 
   it("maps an uncaught unique violation to 409 and other database errors to 500", () => {

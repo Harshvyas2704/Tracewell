@@ -1,7 +1,6 @@
 import { lineOf, type Fixes } from "../../engine";
 
-// Display code. It is shown to the user and never executed. Both variants
-// share everything up to the orders query, so the lines above it never move.
+// Display code. It is shown to the user and never executed.
 const head = `import express from "express";
 import { db } from "./db.js";
 
@@ -53,7 +52,11 @@ const eagerLoad = `${head}
 });
 `;
 
-export const code = (fixes: Fixes) => (fixes.eagerLoad ? eagerLoad : nPlusOne);
+// Shown above the app code when the index fix is on.
+const migration = `// Migration
+// CREATE INDEX order_items_order_id_idx ON order_items (order_id);
+
+`;
 
 const linesOf = (source: string) => {
   const at = (snippet: string) => lineOf(source, snippet);
@@ -68,6 +71,18 @@ const linesOf = (source: string) => {
   };
 };
 
-const variants = { nPlusOne: linesOf(nPlusOne), eagerLoad: linesOf(eagerLoad) };
+// One variant per combination of the two fixes: its code and where things are in it.
+const variant = (eager: boolean, indexed: boolean) => {
+  const source = (indexed ? migration : "") + (eager ? eagerLoad : nPlusOne);
+  return { code: source, lines: linesOf(source) };
+};
 
-export const lines = (fixes: Fixes) => (fixes.eagerLoad ? variants.eagerLoad : variants.nPlusOne);
+const variants = [
+  [variant(false, false), variant(false, true)],
+  [variant(true, false), variant(true, true)],
+] as const;
+
+const pick = (fixes: Fixes) => variants[fixes.eagerLoad ? 1 : 0][fixes.indexOrderItems ? 1 : 0];
+
+export const code = (fixes: Fixes) => pick(fixes).code;
+export const lines = (fixes: Fixes) => pick(fixes).lines;

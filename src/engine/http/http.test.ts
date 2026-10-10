@@ -78,16 +78,16 @@ describe("router", () => {
       type: "found",
       params: { id: "7" },
     });
-    expect(matchRoute(routes, "GET", "/nope")).toEqual({ type: "not-found" });
+    expect(matchRoute(routes, "GET", "/nope")).toEqual({ type: "not-found", otherMethods: [] });
     expect(matchRoute(routes, "DELETE", "/products")).toEqual({
-      type: "wrong-method",
-      allowed: ["GET", "POST"],
+      type: "not-found",
+      otherMethods: ["GET", "POST"],
     });
   });
 
-  it("answers 404 when no route matches and 405 for a wrong method", () => {
+  it("answers 404 when no route matches", () => {
     const missing = send(routes, { method: "GET", path: "/nope" });
-    expect(missing.responses.r1?.status).toBe(404);
+    expect(missing.responses.r1).toMatchObject({ status: 404, body: { error: "Cannot GET /nope" } });
     expect(types(missing)).toEqual([
       "REQUEST_RECEIVED",
       "BODY_PARSE_SKIPPED",
@@ -98,15 +98,30 @@ describe("router", () => {
       {
         status: 404,
         code: "ROUTE_NOT_FOUND",
-        message: "No route matches GET /nope",
+        message: "No route for GET /nope",
         requestId: "r1",
         eventSeq: 2,
       },
     ]);
+  });
 
-    const wrong = send(routes, { method: "DELETE", path: "/products/3" });
-    expect(wrong.responses.r1).toMatchObject({ status: 405, headers: { allow: "GET" } });
-    expect(wrong.errors[0]?.code).toBe("METHOD_NOT_ALLOWED");
+  it("answers 404 for a wrong method too, like Express, with a hint in the trace", () => {
+    const wrong = send(routes, { method: "DELETE", path: "/products/42" });
+    expect(wrong.responses.r1).toEqual({
+      status: 404,
+      headers: { "content-type": "application/json" },
+      body: { error: "Cannot DELETE /products/42" },
+    });
+    expect(wrong.events[2]).toMatchObject({
+      type: "ROUTE_NOT_FOUND",
+      label: "No route for DELETE /products/42 (GET exists)",
+      status: "fail",
+    });
+    expect(wrong.errors[0]).toMatchObject({ status: 404, code: "ROUTE_NOT_FOUND", eventSeq: 2 });
+    expect(types(wrong)).not.toContain("METHOD_NOT_ALLOWED");
+
+    const two = send(routes, { method: "PATCH", path: "/products" });
+    expect(two.events[2]?.label).toBe("No route for PATCH /products (GET, POST exists)");
   });
 
   it("passes params and query to the handler", () => {

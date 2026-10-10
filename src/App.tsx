@@ -9,7 +9,14 @@ import {
 } from "./engine";
 import { scenarios } from "./scenarios";
 import { CodePanel } from "./ui/code-panel";
-import { CompareView, type RunRecord } from "./ui/compare";
+import {
+  addRun,
+  CompareView,
+  emptyCompare,
+  pinA,
+  unpinA,
+  type RunRecord,
+} from "./ui/compare";
 import { Inspector } from "./ui/inspector";
 import { Header } from "./ui/layout";
 import {
@@ -47,7 +54,7 @@ export default function App() {
   const [presetId, setPresetId] = useState(scenario?.presets?.[0]?.id);
   const [fixes, setFixes] = useState<Fixes>({});
   const [run, setRun] = useState<RunRecord | null>(null); // the run on screen
-  const [pinned, setPinned] = useState<RunRecord | null>(null); // run A of the comparison
+  const [compare, setCompare] = useState(emptyCompare); // the last two runs, or a pinned A and the latest
   const [runCount, setRunCount] = useState(0);
   const [runProblem, setRunProblem] = useState<string | null>(null);
 
@@ -72,7 +79,7 @@ export default function App() {
     setDraft(firstDraft(next));
     setPresetId(next?.presets?.[0]?.id);
     setFixes({});
-    setPinned(null);
+    setCompare(emptyCompare);
     clearRun();
   };
 
@@ -86,7 +93,15 @@ export default function App() {
     try {
       const request = draftToRequest(draft);
       const next = runSimulation({ scenario, requests: [request], fixes });
-      setRun({ id: runCount + 1, scenarioId: scenario.id, request, fixes, result: next });
+      const record: RunRecord = {
+        id: runCount + 1,
+        scenarioId: scenario.id,
+        request,
+        fixes,
+        result: next,
+      };
+      setRun(record);
+      setCompare((state) => addRun(state, record));
       setRunCount(runCount + 1);
       setRunProblem(null);
     } catch (err) {
@@ -148,17 +163,16 @@ export default function App() {
         <ResponseViewer
           response={run ? result?.responses[run.request.id] : undefined}
           error={result?.errors[0]}
-          totalTime={result?.metrics.totalTime ?? 0}
+          metrics={result?.metrics}
           reached={player.atEnd}
           onShowEvent={(seq) => player.seek(events.findIndex((event) => event.seq === seq))}
           onSkipToEnd={player.last}
         />
         <CompareView
           available={scenario.fixes ?? []}
-          current={run}
-          pinned={pinned}
-          onPin={() => setPinned(run)}
-          onUnpin={() => setPinned(null)}
+          state={compare}
+          onPin={() => setCompare(pinA)}
+          onUnpin={() => setCompare(unpinA)}
         />
       </div>
     </div>

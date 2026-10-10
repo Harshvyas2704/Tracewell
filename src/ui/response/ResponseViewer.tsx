@@ -1,4 +1,4 @@
-import { statusLabel, type SimError, type SimResponse } from "../../engine";
+import { statusLabel, type Metrics, type SimError, type SimResponse } from "../../engine";
 import { formatJson, formatMs } from "../format";
 import { StatusIcon } from "../trace";
 
@@ -7,14 +7,14 @@ import { StatusIcon } from "../trace";
 type Props = {
   response: SimResponse | undefined;
   error: SimError | undefined;
-  totalTime: number;
+  metrics: Metrics | undefined;
   reached: boolean; // the cursor is at the end of the trace
   onShowEvent(seq: number): void;
   onSkipToEnd(): void;
 };
 
 export function ResponseViewer(props: Props) {
-  const { response, error, totalTime, reached, onShowEvent, onSkipToEnd } = props;
+  const { response, error, metrics, reached, onShowEvent, onSkipToEnd } = props;
 
   return (
     <section className="panel response" aria-labelledby="response-heading">
@@ -35,10 +35,23 @@ export function ResponseViewer(props: Props) {
               <StatusIcon status={response.status < 400 ? "ok" : "fail"} />{" "}
               {statusLabel(response.status)}
             </span>
-            <span>
-              Total virtual time <strong>{formatMs(totalTime)}</strong>
-            </span>
           </p>
+          {metrics && (
+            <dl className="run-summary" aria-label="Run summary">
+              <div>
+                <dt>Total virtual time</dt>
+                <dd>{formatMs(metrics.totalTime)}</dd>
+              </div>
+              <div>
+                <dt>SQL queries</dt>
+                <dd>{metrics.sqlQueries.toLocaleString("en-US")}</dd>
+              </div>
+              <div>
+                <dt>Rows scanned</dt>
+                <dd>{metrics.rowsScanned.toLocaleString("en-US")}</dd>
+              </div>
+            </dl>
+          )}
           {error && (
             <p className="response-error">
               <code>{error.code}</code> {error.message}{" "}

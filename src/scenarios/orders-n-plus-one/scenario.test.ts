@@ -26,7 +26,7 @@ const orders = (result: SimulationResult) =>
 describe("orders-n-plus-one", () => {
   it("is in the registry and declares its fix", () => {
     expect(getScenario("orders-n-plus-one")).toBe(ordersNPlusOne);
-    expect(ordersNPlusOne.fixes?.map((fix) => fix.id)).toEqual(["eagerLoad"]);
+    expect(ordersNPlusOne.fixes?.map((fix) => fix.id)).toEqual(["eagerLoad", "indexOrderItems"]);
   });
 
   it("has 50 orders per user and 3 to 5 items per order", () => {
@@ -111,25 +111,108 @@ describe("orders-n-plus-one", () => {
     expect(result.metrics.sqlQueries).toBe(0);
   });
 
-  it("shows different code for each variant and points events at its lines", () => {
-    const plain = scenarioCode(ordersNPlusOne, {}) ?? "";
-    const fixed = scenarioCode(ordersNPlusOne, { eagerLoad: true }) ?? "";
-    expect(plain).toContain("for (const order of orders) {\n    const { rows: items } = await db.query(");
-    expect(fixed).toContain("WHERE order_id IN (");
-    expect(plain).not.toBe(fixed);
-    // The pipeline's own lines do not move between variants.
-    expect(lines({}).route).toBe(lines({ eagerLoad: true }).route);
-    expect(lines({}).bodyParser).toBe(lines({ eagerLoad: true }).bodyParser);
+  describe("the two fixes together", () => {
+    const path = "/users/1/orders";
+    const runs = {
+      nPlusOne: run(path),
+      nPlusOneIndexed: run(path, { indexOrderItems: true }),
+      eager: run(path, { eagerLoad: true }),
+      eagerIndexed: run(path, { eagerLoad: true, indexOrderItems: true }),
+    };
+    const itemQueries = (result: SimulationResult) =>
+      queries(result).filter((e) => e.sql?.text.includes("order_items"));
 
-    for (const [fixes, source] of [[{}, plain], [{ eagerLoad: true }, fixed]] as const) {
+    it("returns exactly the same response in all four combinations", () => {
+      for (const result of Object.values(runs)) {
+        expect(result.responses.r1).toEqual(runs.nPlusOne.responses.r1);
+      }
+    });
+
+    it("keeps the same seed rows whether or not the index exists", () => {
+      expect(runs.nPlusOneIndexed.worldAfter).toEqual(runs.nPlusOne.worldAfter);
+    });
+
+    it("runs 51 queries for N+1 and 2 for eager load, whatever the index setting", () => {
+      expect(Object.values(runs).map((r) => r.metrics.sqlQueries)).toEqual([51, 51, 2, 2]);
+    });
+
+    it("uses Index Scans for the item queries only when the index exists", () => {
+      const plans = (result: SimulationResult) => new Set(itemQueries(result).map((e) => e.sql?.plan));
+      expect(itemQueries(runs.nPlusOneIndexed)).toHaveLength(ORDERS_PER_USER);
+      expect(plans(runs.nPlusOneIndexed)).toEqual(new Set(["Index Scan"]));
+      expect(itemQueries(runs.nPlusOneIndexed)[0]?.sql?.index).toBe("order_id");
+      expect(plans(runs.nPlusOne)).toEqual(new Set(["Seq Scan"]));
+      expect(plans(runs.eagerIndexed)).toEqual(new Set(["Index Scan"]));
+      expect(plans(runs.eager)).toEqual(new Set(["Seq Scan"]));
+      // The orders query filters on user_id, which neither fix indexes.
+      for (const result of Object.values(runs)) {
+        expect(queries(result)[0]?.sql?.plan).toBe("Seq Scan");
+      }
+    });
+
+    it("makes each fix faster on its own, and both together fastest", () => {
+      const time = (result: SimulationResult) => result.metrics.totalTime;
+      expect(time(runs.nPlusOneIndexed)).toBeLessThan(time(runs.nPlusOne));
+      expect(time(runs.eager)).toBeLessThan(time(runs.nPlusOne));
+      // Eager load is also faster with the index (it is not just equal).
+      expect(time(runs.eagerIndexed)).toBeLessThan(time(runs.eager));
+    });
+
+    it("leaves N+1 at least 3x slower than eager load even with the index", () => {
+      // This is the point of the lesson: with a good index, the cost that is
+      // left is the round trips.
+      const ratio = runs.nPlusOneIndexed.metrics.totalTime / runs.eagerIndexed.metrics.totalTime;
+      expect(ratio).toBeGreaterThanOrEqual(3);
+    });
+
+    it("spends an indexed item query almost entirely on the round trip", () => {
+      const cost = itemQueries(runs.nPlusOneIndexed)[0]?.sql?.cost;
+      expect(cost?.baseMs).toBe(1);
+      expect((cost?.scanMs ?? 1) + (cost?.sentMs ?? 1)).toBeLessThan(0.2);
+      expect(itemQueries(runs.nPlusOne)[0]?.sql?.cost.scanMs).toBe(20);
+    });
+
+    it("records the totals written in docs/PROGRESS.md", () => {
+      const totals = Object.fromEntries(
+        Object.entries(runs).map(([name, r]) => [name, [r.metrics.totalTime, r.metrics.rowsScanned]]),
+      );
+      expect(totals).toEqual({
+        nPlusOne: [1059.083, 201000],
+        nPlusOneIndexed: [63.078, 1799],
+        eager: [30.083, 5000],
+        eagerIndexed: [14.078, 1799],
+      });
+    });
+  });
+
+  it("shows the migration only when the index fix is on, and still points at the right lines", () => {
+    const all: Fixes[] = [
+      {},
+      { indexOrderItems: true },
+      { eagerLoad: true },
+      { eagerLoad: true, indexOrderItems: true },
+    ];
+    const sources = all.map((fixes) => scenarioCode(ordersNPlusOne, fixes) ?? "");
+    expect(new Set(sources).size).toBe(4);
+
+    for (const [i, fixes] of all.entries()) {
+      const source = sources[i] ?? "";
       const codeLines = source.split("\n");
+      expect(source.startsWith("// Migration\n// CREATE INDEX order_items_order_id_idx")).toBe(
+        fixes.indexOrderItems === true,
+      );
+      expect(source.includes("WHERE order_id IN (")).toBe(fixes.eagerLoad === true);
+
       const result = run("/users/1/orders", fixes);
       const text = (type: string, nth = 0) =>
         codeLines[(result.events.filter((e) => e.type === type)[nth]?.line ?? 0) - 1];
+      expect(text("BODY_PARSE_SKIPPED")).toContain("app.use(express.json())");
       expect(text("ROUTE_MATCHED")).toContain('app.get("/users/:id/orders"');
       expect(text("SQL_QUERY", 0)).toContain("FROM orders WHERE user_id");
       expect(text("SQL_QUERY", 1)).toContain("FROM order_items WHERE order_id");
       expect(text("RESPONSE_SENT")).toContain("res.json({ userId, orders });");
     }
+    // The migration comment moves every line below it.
+    expect(lines({ indexOrderItems: true }).route).toBe(lines({}).route + 3);
   });
 });

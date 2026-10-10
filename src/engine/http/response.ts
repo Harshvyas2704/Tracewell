@@ -21,6 +21,12 @@ export function statusLabel(status: number): string {
   return text ? `${status} ${text}` : String(status);
 }
 
+// A code for a status the handler chose itself, e.g. 404 gives "NOT_FOUND".
+export function statusCode(status: number): string {
+  const text = STATUS_TEXT[status];
+  return text ? text.toUpperCase().replace(/[^A-Z0-9]+/g, "_") : `HTTP_${status}`;
+}
+
 function json(status: number, body: unknown, meta: ResponseMeta = {}): HandlerResult {
   return {
     status,

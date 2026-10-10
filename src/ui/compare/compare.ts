@@ -9,6 +9,39 @@ export type RunRecord = {
   result: SimulationResult;
 };
 
+// The two runs being compared. B is always the latest run. A is the run
+// before it, unless the user pinned A: then A stays and new runs replace B.
+export type CompareState = {
+  a: RunRecord | null;
+  b: RunRecord | null;
+  pinned: boolean;
+};
+
+export const emptyCompare: CompareState = { a: null, b: null, pinned: false };
+
+export function addRun(state: CompareState, run: RunRecord): CompareState {
+  if (state.pinned) return { ...state, b: run };
+  return { a: state.b, b: run, pinned: false };
+}
+
+// Locks A. With a single run so far, that run becomes the pinned A.
+export function pinA(state: CompareState): CompareState {
+  const a = state.a ?? state.b;
+  return a ? { ...state, a, pinned: true } : state;
+}
+
+// Back to automatic mode: the next run moves B to A.
+export function unpinA(state: CompareState): CompareState {
+  const single = state.a !== null && state.a.id === state.b?.id;
+  return { a: single ? null : state.a, b: state.b, pinned: false };
+}
+
+// The pair to show, once there are two different runs.
+export function comparedRuns(state: CompareState): { a: RunRecord; b: RunRecord } | null {
+  const { a, b } = state;
+  return a && b && a.id !== b.id ? { a, b } : null;
+}
+
 export type RunSummary = {
   request: string; // e.g. "GET /users/1/orders"
   status: number;

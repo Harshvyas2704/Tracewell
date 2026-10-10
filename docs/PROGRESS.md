@@ -1,6 +1,6 @@
 # Tracewell: Progress
 
-Active phase: **none. Phase 7 (V1 milestone) is done. Review the product with the user before starting Phase 8.**
+Active work: **V1.1 (`V1.1.md`) is finished as far as this project takes it. Two items are with the user: deploying the app, and confirming speed in desktop Chrome. Waiting for the V2 plan. Do not start Phase 8 of `PLAN.md` before then.**
 
 ## Phase checklist
 
@@ -16,6 +16,277 @@ Active phase: **none. Phase 7 (V1 milestone) is done. Review the product with th
 - [ ] Phase 9: Concurrency, transactions, locks, pool, event loop
 - [ ] Phase 10: Learning layer
 - [ ] Phase 11: Persistence, accessibility, docs, polish
+
+---
+
+## V1.1
+
+Plan: `V1.1.md`. Steps: 1 Node upgrade and tooling, 2 Engine fixes, 3 Separate N+1 from the missing index, 4 UI improvements, 5 End-to-end tests, 6 Speed check, 7 CI and deployment.
+
+- [x] Step 1: Node upgrade and tooling (done without the Node upgrade, see below)
+- [x] Step 2: Engine fixes
+- [x] Step 3: Separate N+1 from the missing index
+- [x] Step 4: UI improvements
+- [x] Step 5: End-to-end tests with Playwright
+- [x] Step 6: Speed check (measured in headless Chromium; desktop Chrome check by the user still open)
+- [x] Step 7: CI and deployment (CI workflow and README written; deployment is done manually by the user)
+
+### V1.1 status against its "done when" list (2026-10-07)
+
+| # | Criterion | Status |
+| --- | --- | --- |
+| 1 | All seven steps meet their criteria | Partly. Step 1 kept Node 20.18.1. Step 6 lacks the desktop Chrome confirmation. Step 7 has no deployment and the workflow has not run on GitHub |
+| 2 | All checks pass on the new Node version and in CI | Locally yes, on Node 20.18.1: 163 unit tests, 14 end-to-end tests, lint, typecheck, build. Not run in CI |
+| 3 | N+1 is still several times slower than eager loading even with the index | Yes: 63.078 ms against 14.078 ms, 4.5 times |
+| 4 | The app is live at a public link | No. The user deploys manually |
+| 5 | `docs/PROGRESS.md` has a V1.1 section and `docs/V1.md` sections 11 and 12 are updated | Yes |
+
+### Step 7: CI and deployment (done 2026-10-07, without deployment)
+
+**Deployment was taken out of this step by the user.** Asked for the repository and the hosting choice, the user answered: "nah I will deploy this manually".
+
+#### Built
+
+- `.github/workflows/ci.yml`: on push and pull request, installs with pnpm (version from `packageManager`, Node from `.nvmrc`), then runs `lint`, `typecheck`, `test`, installs Playwright's Chromium, and runs `test:e2e`. `test:e2e` builds the app first, so there is no separate build step. On failure it uploads `test-results`.
+- `README.md`: one paragraph on what Tracewell is, how to run it locally, the checks, and links to `docs/V1.md`, `docs/PROGRESS.md` and `PLAN.md`. The tracked file `readme.md` was renamed to `README.md`.
+- `docs/V1.md` sections 11 and 12 rewritten to match the code, with a note at the top that sections 1 to 10 still describe V1.
+
+#### Not built, by the user's decision
+
+- No deploy job, no hosting setup, no Vite `base` change, no live link in the README.
+
+#### Not verified
+
+- The workflow has not run on GitHub. Nothing was pushed. The `@v4` action versions in it are from memory and unchecked.
+- `pnpm test:speed` is not part of the workflow.
+
+#### For the manual deployment
+
+- `pnpm build` writes a static site to `dist/`. Any static host can serve it.
+- If it is served from a sub-path (GitHub Pages serves this repository at `/Tracewell/`), set `base: "/Tracewell/"` in `vite.config.ts` first, or the page loads without its script and styles.
+- Once there is a link, add it to `README.md`.
+
+### Step 6: Speed check (measured 2026-10-07, desktop Chrome check still open)
+
+#### Built
+
+- `e2e/speed.spec.ts`, its own Playwright project `speed`, run with `pnpm test:speed` (`pnpm build && playwright test --project=speed --workers=1`). It is left out of `pnpm test:e2e`, so other tests do not compete with it for the CPU.
+- It measures inside the page, on the production build, from the user's action until the DOM shows the result: 7 Run clicks to the first trace row, and 12 arrow-key steps to the position text changing.
+- Loose assertions only: median Run under 500 ms, median step under 200 ms.
+
+#### Numbers (Playwright's headless Chromium 153, production build, three runs)
+
+| | Run to first trace row, median | First Run of the page | Step, median | Step, max |
+| --- | --- | --- | --- | --- |
+| Product API, "Valid" (7 events) | 1.8 to 2.0 ms | 6 to 7 ms | 0.9 to 1.0 ms | 1.7 ms |
+| N+1, default run (55 events) | 5.4 to 5.6 ms | about 14 ms | 1.0 to 1.1 ms | 2.2 ms |
+
+Both are far inside the step's targets (Run under 100 ms, step under 50 ms).
+
+#### Finding
+
+- The slow Run reported in V1 (0.3 to 0.8 s) does not reproduce. That measurement was taken in the system Chrome, driven by a script from inside a restricted tool sandbox, where everything ran slowly: a CPU profile there showed the time spread evenly over all functions, and `performance.now()` alone took about 0.07 ms per call. The same build in Playwright's Chromium takes 2 to 6 ms.
+- So nothing in the app was found to be slow, and nothing was changed. No memoization was added. The four likely causes listed in the plan were not investigated further, because there is no slowness to explain.
+
+#### What the measurement does not cover
+
+- It stops when the DOM is updated. Layout and paint of that frame are not included.
+- It is headless Chromium, not a normal desktop browser.
+
+#### Done when
+
+- "In normal desktop Chrome, Run feels instant and stepping is under 50 ms": **not confirmed yet.** This needs the user. Asked on 2026-10-07 to run `pnpm build && pnpm preview`, try Run and the arrow keys on the N+1 scenario, and report whether anything lags.
+- If it does lag there, start from a Performance panel recording of one Run and five steps.
+
+### Step 5: End-to-end tests with Playwright (done 2026-10-06)
+
+#### Built
+
+- `@playwright/test` 1.63.0, Chromium only (it supports Node 20).
+- `playwright.config.ts`: tests in `e2e/`, run against `pnpm preview` on port 4173, which Playwright starts itself. Reduced motion is on by default so the app is in step mode and nothing moves on its own; the play mode test turns motion back on.
+- Script `test:e2e`: `pnpm build && playwright test`. `pnpm test` still runs Vitest only (it matches `src/**/*.test.ts`).
+- `e2e/helpers.ts` and four spec files, 14 tests:
+
+| Plan item | Test | File |
+| --- | --- | --- |
+| 1 | every preset runs and shows its status | `product-api.spec.ts` |
+| 2 | invalid JSON is rejected with 400 at the parsing stage | `product-api.spec.ts` |
+| 3 | the N+1 loop: 51 queries, turn on eager loading, 2 queries, compare | `n-plus-one.spec.ts` |
+| 4 | with the index on, an item query is an Index Scan | `n-plus-one.spec.ts` |
+| 5 | the previous run is kept automatically, and pinning locks A | `n-plus-one.spec.ts` |
+| 6 | keyboard: Right, Left, Home, End and Space move through the trace | `player.spec.ts` |
+| 7 | with reduced motion, the app opens in step mode | `player.spec.ts` |
+| 8 | narrow viewport: the page never scrolls sideways | `layout.spec.ts` |
+| 9 | a wrong method gets 404, like Express | `product-api.spec.ts` |
+
+- Five more, beyond the plan's list: the response appears only at the end of the trace; without the index an item query is a Seq Scan with `4,000 x 0.005 =` `20.000 ms`; the Why section opens and shows inline code; keys are left alone while typing in a field; with motion allowed the app opens in play mode and animates to the end.
+
+#### Decisions
+
+- Elements are found by role and label: `region` by panel heading, `group` "Payload presets" and "Player", `checkbox` by fix label, `row` and `cell` in the tables. No `data-testid` was added. Three places use a CSS class because there is no accessible name to use: the run summary's `dl.run-summary`, the moving dot `.strip-dot`, and `.why code`.
+- `tsconfig.json` now includes `e2e` and `playwright.config.ts`, so `typecheck` covers them. ESLint ignores `test-results` and `playwright-report`, and both are in `.gitignore`.
+- `reuseExistingServer` is on, so a preview server already running on port 4173 is used as it is. It serves `dist` from disk, so it still serves the fresh build.
+
+#### Done when
+
+- `pnpm test:e2e` passed three times in a row: 14 passed each time, in 6.2 s, 5.9 s and 4.9 s.
+- 163 Vitest tests, `lint`, `typecheck` pass.
+
+#### Note
+
+- This replaces the browser check scripts from Phases 4 to 7 and V1.1 Steps 3 and 4, which lived outside the repository.
+- First use on another machine needs `pnpm exec playwright install chromium` (about 95 MB).
+
+### Step 4: UI improvements (done 2026-10-06)
+
+#### 4.1 Cost breakdown in the inspector
+
+- Under the SQL block of a `SQL_QUERY` event, a "Where the time goes" table: Round trip, Rows scanned, Rows returned, Rows written, Sort, then Total. Lines that are zero are hidden. Each line shows its formula with the actual numbers, for example `4,000 x 0.005 = 20.000 ms`.
+- `ui/inspector/costLines.ts` builds the lines. The amounts come from `sql.cost` and the total from the event's duration, both computed by the engine. Only the per-row constants are read in the UI, from the engine's exported `COST_CONFIG`, to print the formula.
+- Times in this table always show three decimals (`formatMsFixed`).
+
+#### 4.2 Keep the previous run automatically
+
+- `ui/compare/compare.ts`: `CompareState { a, b, pinned }` with `addRun`, `pinA`, `unpinA`, `comparedRuns`. B is always the latest run. Without a pin, each new run moves B to A. With a pin, A stays and new runs replace only B.
+- The A column is headed "A (previous run)" or "A (pinned run)", and a line under the table says which mode is active.
+- One button: "Pin A" when two runs are shown, "Pin this run as A" with a single run, "Unpin A" while pinned.
+- Changing scenario clears both runs. The comparison shows nothing until there are two runs.
+- Decisions:
+  - Picking a preset clears the trace on screen but keeps the comparison's runs, as before.
+  - Pinning with a single run locks that run as A. The comparison appears when a second run arrives.
+  - Unpinning keeps the current A and B. The next run then moves B to A.
+
+#### 4.3 Run summary next to the response
+
+- Under the status in the response viewer: Total virtual time, SQL queries, Rows scanned, from `result.metrics`. It appears with the response, when the cursor reaches the end.
+
+#### 4.4 "Why" panel per scenario
+
+- `Scenario.why?: string[]`. Rendered in the header under the description as a collapsible "Why" section (`<details>`), closed by default and closed again when the scenario changes.
+- `ui/layout/inlineCode.ts`: `splitInlineCode` splits a paragraph on backticks into text and code parts. No Markdown library and nothing rendered as HTML. A backtick without a partner stays as normal text.
+- Content written for both scenarios: four paragraphs for `product-api`, five for `orders-n-plus-one`. A test checks each scenario has three to six paragraphs, balanced backticks, and no dash punctuation or angle brackets.
+- The N+1 text says an indexed item query takes "about 1 ms". That figure comes from the cost model (1.12 ms). If `COST_CONFIG` changes, the sentence needs checking.
+
+#### Done when
+
+- All four work in the browser at desktop (1440 px) and narrow (390 px) widths, checked in headless Chrome with no console errors and no horizontal page scroll:
+  - cost table for an N+1 item query: `1.000`, `4,000 x 0.005 = 20.000`, `3 x 0.010 = 0.030`, total `21.030 ms`; for an INSERT it adds `Rows written 1 x 0.100 = 0.100 ms`;
+  - two runs without pinning showed "A (previous run)" with 51 against 2 queries; a third run moved B to A; after pinning, two more runs left A unchanged; unpinning returned to "A (previous run)";
+  - run summary: `1059.083 ms`, `51`, `201,000`;
+  - Why section: closed at first, opens, four and five paragraphs, inline code rendered.
+- Unit tests cover the auto-keep logic (`compare.test.ts`), the backtick splitting (`inlineCode.test.ts`) and the cost lines (`costLines.test.ts`). 163 tests pass. `lint`, `typecheck`, `build` pass.
+
+Also fixed: a long duration such as `1051.99 ms` overflowed its column in a trace row.
+
+### Step 3: Separate N+1 from the missing index (done 2026-10-06)
+
+#### Built
+
+- Second fix on `orders-n-plus-one`: `indexOrderItems`, "Index order_items.order_id".
+- `Scenario.world` may be a function of the fixes. With the fix on, `order_items` gets `indexes: ["order_id"]`. The rows are the same objects in both cases.
+- Display code: with the fix on, a three-line block is added at the top (`// Migration`, `// CREATE INDEX order_items_order_id_idx ON order_items (order_id);`, a blank line). The scenario now has four code variants.
+- The scenario description says it has two separate problems, each with its own fix.
+- Engine: `PerFixes<T>` (`T | (fixes) => T`) and `withFixes(value, fixes)`. `world`, `routes`, `code` and `lines` are all `PerFixes`.
+
+#### The four totals for `GET /users/1/orders`
+
+| | Queries | Total time | Rows scanned | Item query plan |
+| --- | --- | --- | --- | --- |
+| N+1, no index (default) | 51 | 1059.083 ms | 201,000 | Seq Scan, 4,000 rows each |
+| N+1, with index | 51 | 63.078 ms | 1,799 | Index Scan, 15 to 17 rows each |
+| Eager load, no index | 2 | 30.083 ms | 5,000 | Seq Scan, 4,000 rows |
+| Eager load, with index | 2 | 14.078 ms | 1,799 | Index Scan, 799 rows |
+
+- N+1 with the index is 4.48 times slower than eager load with the index (63.078 / 14.078). The plan requires at least 3.
+- Eager load with the index is faster than without it (14.078 against 30.083), not equal. The orders query does not dominate: it takes 6.5 ms in every run.
+- With the index, one item query costs 1.12 ms, of which 1 ms is the round trip. That is the lesson: 50 of them is about 56 ms of round trips that the index cannot remove.
+- N+1 with the index (63 ms) is slower than eager load without it (30 ms).
+- `COST_CONFIG` was not changed.
+- All four return exactly the same response body. Rows returned is 249 in all four.
+
+#### Decisions
+
+- The plan says a comment at the top of the display code needs no other change because line numbers come from `lineOf`. That holds for the handler's lines, but the lines the pipeline uses (`scenario.lines.bodyParser`, `route.line`) were fixed per scenario, and the comment moves them by 3. So `routes` and `lines` became `PerFixes` too. A test checks that the body parser, route, both queries and the response point at the right text in all four variants.
+- The orders query stays a Seq Scan in all four runs. It filters on `orders.user_id`, which neither fix indexes.
+
+#### Done when
+
+- All four combinations work in tests (147 tests pass) and in the UI. In headless Chrome each was run from the fix checkboxes: the trace had 55 or 6 events, the code panel started with `// Migration` only when the index fix was on, the highlighted response line moved accordingly (29, 32, 32, 35), and the inspector showed Seq Scan or "Index Scan using index on order_id" for an item query. No console errors.
+- The comparison view named the right differing fixes: index only, eager only, both, and with A and B swapped (`Eager load items (A on, B off)`). A unit test covers all pairs.
+- `lint`, `typecheck`, `build` pass.
+
+### Step 2: Engine fixes (done 2026-10-05)
+
+#### 2.1 Wrong method returns 404, like Express
+
+- A path that exists only under another method now answers 404 with body `{ "error": "Cannot DELETE /products/42" }`.
+- The event is `ROUTE_NOT_FOUND` with the label `No route for DELETE /products/42 (GET exists)`. Its snapshot lists the other methods.
+- `METHOD_NOT_ALLOWED`, the 405 and the `Allow` header are gone. `matchRoute` returns `{ type: "not-found", otherMethods }`.
+- Decision: a path that matches nothing at all gets the same body shape, `Cannot GET /nope`, and the label `No route for GET /nope`. It used to say `No route matches GET /nope`. Express sends the same text in both cases, so both now match.
+
+#### 2.2 Error pointer points at the cause of the final status
+
+- `SimEvent.handled?: boolean`. When a `DbError` is thrown into a handler and the handler catches it and carries on, the query's event gets `handled: true` and " (caught)" on its label.
+- `SimError` for a status of 400 or above points at, in order: (1) the failed query whose error reached the error handler; (2) otherwise the last failed event the handler did not recover from; (3) otherwise `RESPONSE_SENT`, with a code derived from the status (`NOT_FOUND`, `CONFLICT`, `UNPROCESSABLE_ENTITY`, ...).
+- How the runner tells caught from uncaught: the error handler's `ERROR_HANDLED` trace effect carries the thrown error as `cause`. If the next effect after a query error is that trace with the same error, the handler did not catch it. Any other next effect means it was caught.
+- Behaviour changes that follow from the rules:
+  - An uncaught 23505 now points at the failed `SQL_QUERY` event. It used to point at `ERROR_HANDLED`. In the UI, "Show where it went wrong" on the "Duplicate name" preset now jumps to the INSERT.
+  - A 404 the handler returns on purpose has code `NOT_FOUND`. It used to be `HTTP_404`.
+- Decisions for cases the plan does not cover:
+  - A handler that catches a query error, does other work, and then throws the same error again: the error did reach the error handler, so rule 1 applies. The query is the cause and its `handled` mark and " (caught)" label are removed again.
+  - A handler that catches a query error and throws a different error: the query stays `handled`, and the error points at `ERROR_HANDLED` with that error's code (rule 2).
+  - A handler that catches a query error and answers 200: no `SimError` at all.
+- UI follow-up: the code panel's "not reached" logic ignores failed events that are `handled`, so a recovered failure does not dim the rest of the route.
+
+#### 2.3 Cost breakdown on every SQL event
+
+- `SqlInfo.cost: { baseMs, scanMs, sentMs, writeMs, sortMs }`, computed by `queryCost` in `engine/db/cost.ts`. The duration is now the sum of the parts (`costTotal`), so they cannot drift apart.
+- Each part is rounded to 0.001 ms. Durations are unchanged from V1: every existing timing assertion still passes.
+- A failed query reports the cost of the work done before it failed.
+
+Left as is, as the plan says: `GET /products?limit=-1` reaches the database and returns 500.
+
+#### Done when
+
+- All new and updated tests pass: 137 tests. `lint`, `typecheck`, `build` pass.
+- Every product-api preset gives the same status as in V1 (200, 200, 201, 400, 400, 404, 401, 403, 409). This is now a test. Wrong-method requests give 404.
+- The plan's three named tests exist: catch a 23505 and return 422 (`handled: true`, points at `RESPONSE_SENT`, code `UNPROCESSABLE_ENTITY`); uncaught 23505 gives 409 and points at the failed SQL event; `GET /products/999999` points at `RESPONSE_SENT` with code `NOT_FOUND`.
+- Not checked in a browser. The changes are in the engine; the UI was not opened for this step.
+
+### Step 1: Node upgrade and tooling (done 2026-10-05, Node not upgraded)
+
+**The step's goal, moving off Node 20, was not met. This was the user's decision.** Asked which Node to target, the user answered: "current node version installed in my pc is 20.18.1, work with that". Node 20 reached end of life in April 2026, so this stays an open item.
+
+#### Built
+
+- `.nvmrc` with `20.18.1`, and `engines.node` `>=20.18.1 <21` in `package.json`.
+- pnpm 10.34.6 is installed globally under Node 20, so `pnpm` works directly. The `packageManager` pin is kept.
+- Vitest 3.2.7 to 4.1.11. Vitest 4 supports Node 20 and Vite 6. Nothing needed changing.
+- typescript-eslint 8.71.0 to 8.71.1.
+- `src/lint-guard.test.ts`: lints short code strings through ESLint's Node API with the real `eslint.config.js`, using file paths inside `src/engine` and `src/scenarios`. Expects errors for React imports, imports from a `ui` folder, `Date.now()`, `Math.random()`, `setTimeout` and `setInterval`, and no errors for a normal engine import, a scenario importing the engine, or a UI file.
+- `src/scratch.test.ts` deleted. It had been committed in the "Phase 7 completed" commit.
+
+#### Not upgraded, because they need a newer Node
+
+| Package | Installed | Newest | Newest needs |
+| --- | --- | --- | --- |
+| Vite | 6.4.3 | 8.3.2 | Node 20.19 or 22.12 (Vite 7 has the same floor) |
+| `@vitejs/plugin-react` | 4.7.0 | 6.1.2 | Node 20.19 or 22.12 (version 5 has the same floor) |
+| ESLint, `@eslint/js` | 9.39.5 | 10.x | Node 20.19, 22.13 or 24 |
+| Vitest | 4.1.11 | 5.0.3 | Node 22.12 or 24 |
+
+ESLint 9 now prints a "no longer supported" deprecation warning on install. TypeScript (5.9.3) and Zod (4.6.5) were left on their current majors, as the plan says. `eslint-plugin-react-hooks` 7.1.1 is already the newest.
+
+#### Done when
+
+- `node -v` matches `.nvmrc`: yes, both 20.18.1.
+- All checks pass on the new versions: 127 tests, `lint`, `typecheck` and `build` pass with Vitest 4.
+- The lint guard test passes, and fails if the guard rules are removed: checked by hand once. With the guard block removed from `eslint.config.js`, 6 of the 9 tests failed. The block was restored.
+
+#### Consequences for later steps
+
+- Step 5 (Playwright) and Step 7 (CI) should use Node 20.18.1 too, from `.nvmrc`.
+- When Node is upgraded later: raise `.nvmrc` and `engines.node`, then upgrade Vite, `@vitejs/plugin-react`, Vitest and ESLint together.
 
 ---
 

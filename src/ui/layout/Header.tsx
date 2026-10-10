@@ -1,4 +1,5 @@
 import type { Scenario } from "../../engine";
+import { Why } from "./Why";
 
 type Props = {
   scenarios: Scenario[];
@@ -21,6 +22,8 @@ export function Header({ scenarios, scenario, onSelect }: Props) {
         </select>
       </label>
       {scenario.description && <p className="muted scenario-description">{scenario.description}</p>}
+      {/* Keyed by scenario so the section closes again when the scenario changes. */}
+      <Why key={scenario.id} paragraphs={scenario.why ?? []} />
     </header>
   );
 }

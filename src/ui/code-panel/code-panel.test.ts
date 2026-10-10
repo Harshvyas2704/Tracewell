@@ -93,6 +93,13 @@ describe("code lines at the cursor", () => {
     expect(skipped.some((line) => line.startsWith("app.use((err"))).toBe(false);
   });
 
+  it("does not cut the route short for a failure the handler recovered from", () => {
+    const events = eventsOf("valid").map((event) =>
+      event.type === "SQL_QUERY" ? { ...event, status: "fail" as const, handled: true } : event,
+    );
+    expect(linesWhere(events, events.length - 1, "notReached")).toEqual([]);
+  });
+
   it("marks the success path as not reached when the handler returns 404", () => {
     const events = eventsOf("not-found");
     const skipped = linesWhere(events, events.length - 1, "notReached").map((n) => text(n).trim());

@@ -15,16 +15,32 @@ export function indexDepth(n: number): number {
   return n === 0 ? 0 : Math.max(1, Math.ceil(Math.log2(n)));
 }
 
+// Where a query's time goes. The parts always add up to the duration.
+export type QueryCost = {
+  baseMs: number; // round trip, parse, plan
+  scanMs: number; // rowsScanned * perRowScanMs
+  sentMs: number; // rowsReturned * perRowSentMs
+  writeMs: number; // rowsWritten * perRowWriteMs
+  sortMs: number; // sort cost, 0 if no sort
+};
+
+export function queryCost(work: Work): QueryCost {
+  return {
+    baseMs: COST_CONFIG.baseMs,
+    scanMs: roundMs(work.rowsScanned * COST_CONFIG.perRowScanMs),
+    sentMs: roundMs(work.rowsReturned * COST_CONFIG.perRowSentMs),
+    writeMs: roundMs(work.rowsWritten * COST_CONFIG.perRowWriteMs),
+    sortMs:
+      work.rowsSorted > 1
+        ? roundMs(work.rowsSorted * Math.log2(work.rowsSorted) * COST_CONFIG.perSortCompareMs)
+        : 0,
+  };
+}
+
+export function costTotal(cost: QueryCost): number {
+  return roundMs(cost.baseMs + cost.scanMs + cost.sentMs + cost.writeMs + cost.sortMs);
+}
+
 export function queryDuration(work: Work): number {
-  const sort =
-    work.rowsSorted > 1
-      ? work.rowsSorted * Math.log2(work.rowsSorted) * COST_CONFIG.perSortCompareMs
-      : 0;
-  return roundMs(
-    COST_CONFIG.baseMs +
-      work.rowsScanned * COST_CONFIG.perRowScanMs +
-      work.rowsReturned * COST_CONFIG.perRowSentMs +
-      work.rowsWritten * COST_CONFIG.perRowWriteMs +
-      sort,
-  );
+  return costTotal(queryCost(work));
 }

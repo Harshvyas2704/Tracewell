@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { COST_CONFIG, indexDepth, queryDuration } from "./cost";
+import { COST_CONFIG, costTotal, indexDepth, queryDuration } from "./cost";
 import { createDatabase, snapshotDatabase } from "./database";
 import { executeQuery } from "./execute";
 import { toSql } from "./sql";
@@ -179,6 +179,35 @@ describe("select", () => {
       COST_CONFIG.baseMs + 1000 * COST_CONFIG.perRowScanMs + 200 * COST_CONFIG.perRowSentMs,
     );
     expect(stats.rowsSorted).toBe(0);
+  });
+
+  it("breaks the duration into parts that add up to it", () => {
+    const database = setup();
+    const results = [
+      executeQuery(database, select({ where: { id: 42 } })),
+      executeQuery(database, select({ where: { category: "books" } })),
+      executeQuery(database, select({ orderBy: { column: "price" } })),
+      executeQuery(database, select({ where: { category: "toys" }, orderBy: { column: "name" }, limit: 7 })),
+      executeQuery(database, { type: "insert", table: "products", values: { name: "Lamp", price: 3, category: "tools" } }),
+      executeQuery(database, { type: "update", table: "products", set: { price: 1 }, where: { category: "music" } }),
+      executeQuery(database, { type: "delete", table: "products", where: { category: "games" } }),
+      executeQuery(database, { type: "insert", table: "products", values: { name: "Product 5", price: 3, category: "tools" } }),
+    ];
+    for (const { duration, cost } of results) {
+      const sum = cost.baseMs + cost.scanMs + cost.sentMs + cost.writeMs + cost.sortMs;
+      expect(Math.abs(sum - duration)).toBeLessThan(0.001);
+      expect(costTotal(cost)).toBe(duration);
+    }
+
+    const [byId, byCategory, sorted, , inserted, updated] = results;
+    expect(byId?.cost).toEqual({ baseMs: 1, scanMs: 0.055, sentMs: 0.01, writeMs: 0, sortMs: 0 });
+    expect(byCategory?.cost).toEqual({ baseMs: 1, scanMs: 5, sentMs: 2, writeMs: 0, sortMs: 0 });
+    expect(sorted?.cost.sortMs).toBeGreaterThan(0);
+    expect(inserted?.cost.writeMs).toBe(COST_CONFIG.perRowWriteMs);
+    expect(updated?.cost.writeMs).toBe(200 * COST_CONFIG.perRowWriteMs);
+    // A failed query still reports the work done before it failed.
+    expect(results.at(-1)?.error?.code).toBe("23505");
+    expect(results.at(-1)?.cost.writeMs).toBe(0);
   });
 
   it("orders, limits and offsets rows", () => {

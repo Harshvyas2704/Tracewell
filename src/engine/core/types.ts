@@ -1,3 +1,4 @@
+import type { QueryCost } from "../db/cost";
 import type { DbEffect } from "../db/effects";
 import type { QueryStats, Row, TableDef, Value } from "../db/types";
 import type { Rng } from "./rng";
@@ -41,6 +42,7 @@ export type EventStatus = "ok" | "fail" | "skip" | "wait";
 export type SqlInfo = QueryStats & {
   text: string;
   params: Value[];
+  cost: QueryCost; // where the event's duration comes from
 };
 
 export type SimEvent = {
@@ -56,15 +58,21 @@ export type SimEvent = {
   snapshot?: unknown; // request data at this moment (raw, parsed, validated, ...)
   sql?: SqlInfo;
   groupKey?: string; // used to collapse repeated events (N+1)
+  handled?: boolean; // a failed event whose error the handler caught and recovered from
 };
 
-// One entry per request that ended with a status of 400 or above.
+// One entry per request that ended with a status of 400 or above. It points
+// at the cause of that status:
+//   1. the failed event whose error reached the error handler, if there is one;
+//   2. otherwise the last failed event the handler did not recover from
+//      (auth, validation, body parsing, routing, a thrown error);
+//   3. otherwise the RESPONSE_SENT event, for a status the handler chose itself.
 export type SimError = {
   status: number;
-  code: string;
+  code: string; // from the event in rule 1 or 2, or from the status in rule 3
   message: string;
   requestId: string;
-  eventSeq: number; // the event where it went wrong
+  eventSeq: number;
 };
 
 // Derived from events only.
@@ -111,6 +119,7 @@ export type TraceEffect = {
   label: string;
   status?: EventStatus; // defaults to "ok"
   code?: string; // error code when status is "fail", defaults to type
+  cause?: unknown; // the thrown error this event is handling, set by the error handler
   ms?: number; // virtual time this step takes, defaults to 0
   snapshot?: unknown;
   line?: number;
@@ -198,16 +207,21 @@ export type Fix = {
   description: string;
 };
 
+// A part of a scenario that may change with the fixes that are on. Read it
+// with withFixes(value, fixes).
+export type PerFixes<T> = T | ((fixes: Fixes) => T);
+
 export type Scenario = {
   id: string;
   name: string;
   description?: string;
-  world?: TableDef[]; // tables and seed rows
-  routes: Route[];
-  // Display code, shown to the user and never executed. A function when the
-  // code changes with the fixes that are on.
-  code?: string | ((fixes: Fixes) => string);
-  lines?: { bodyParser?: number; errorHandler?: number }; // display code lines
+  // Short paragraphs explaining what the scenario shows and why. Plain text;
+  // `backticks` mark inline code.
+  why?: string[];
+  world?: PerFixes<TableDef[]>; // tables and seed rows
+  routes: PerFixes<Route[]>;
+  code?: PerFixes<string>; // display code, shown to the user and never executed
+  lines?: PerFixes<{ bodyParser?: number; errorHandler?: number }>; // display code lines
   presets?: Preset[];
   fixes?: Fix[];
 };

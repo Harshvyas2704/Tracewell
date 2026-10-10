@@ -4,12 +4,17 @@
   "version": "0.0.0",
   "type": "module",
   "packageManager": "pnpm@10.34.6",
+  "engines": {
+    "node": ">=20.18.1 <21"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "pnpm build && playwright test --project=chromium",
+    "test:speed": "pnpm build && playwright test --project=speed --workers=1",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },
@@ -25,6 +30,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
+    "@playwright/test": "^1.63.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^4.7.0",
@@ -32,8 +38,8 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^17.13.0",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.71.0",
+    "typescript-eslint": "^8.71.1",
     "vite": "^6.4.3",
-    "vitest": "^3.2.7"
+    "vitest": "^4.1.11"
   }
 }

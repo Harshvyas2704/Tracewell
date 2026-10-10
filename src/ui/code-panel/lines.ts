@@ -43,7 +43,8 @@ export function lineStates(lines: string[], events: SimEvent[], cursor: number):
 
   // After a failure, the rest of the matched route's code never runs.
   const notReached = new Set<number>();
-  const failureAt = past.findIndex((event) => event.status === "fail");
+  // A failure the handler caught and recovered from does not stop the route.
+  const failureAt = past.findIndex((event) => event.status === "fail" && !event.handled);
   const routeLine = past.find((event) => event.type === "ROUTE_MATCHED")?.line;
   if (failureAt >= 0 && routeLine !== undefined) {
     const end = blockEnd(lines, routeLine);

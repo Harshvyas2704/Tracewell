@@ -1,3 +1,4 @@
+import { withFixes } from "../core/code";
 import { COST_CONFIG } from "../core/config";
 import { trace } from "../core/effects";
 import type { Rng } from "../core/rng";
@@ -62,9 +63,11 @@ export function* requestPipeline(args: PipelineArgs): Steps<SimResponse> {
 
 function* respond(args: PipelineArgs, headers: Record<string, string>): Steps<HandlerResult> {
   const { scenario, req, fixes, rng } = args;
+  const routes = withFixes(scenario.routes, fixes);
+  const lines = withFixes(scenario.lines, fixes);
 
   // express.json(): only reads bodies sent as application/json.
-  const bodyLine = scenario.lines?.bodyParser;
+  const bodyLine = lines?.bodyParser;
   const parse = { stage: "middleware", line: bodyLine } as const;
   let body: unknown = undefined;
   if (req.body === null || req.body === "") {
@@ -102,24 +105,20 @@ function* respond(args: PipelineArgs, headers: Record<string, string>): Steps<Ha
     });
   }
 
-  const match = matchRoute(scenario.routes, req.method, req.path);
+  const match = matchRoute(routes, req.method, req.path);
   const route = { stage: "router", ms: COST_CONFIG.routeMs } as const;
   if (match.type === "not-found") {
-    const message = `No route matches ${req.method} ${req.path}`;
-    yield trace({ ...route, type: "ROUTE_NOT_FOUND", label: message, status: "fail" });
-    return res.status(404).json({ error: message });
-  }
-  if (match.type === "wrong-method") {
-    const message = `${req.method} is not allowed for ${req.path}`;
+    const target = `${req.method} ${req.path}`;
+    const hint = match.otherMethods.length > 0 ? ` (${match.otherMethods.join(", ")} exists)` : "";
     yield trace({
       ...route,
-      type: "METHOD_NOT_ALLOWED",
-      label: message,
+      type: "ROUTE_NOT_FOUND",
+      label: `No route for ${target}${hint}`,
       status: "fail",
-      snapshot: { allowed: match.allowed },
+      snapshot: { otherMethods: match.otherMethods },
     });
-    const response = res.status(405).json({ error: message });
-    return { ...response, headers: { ...response.headers, allow: match.allowed.join(", ") } };
+    // The same body Express sends when nothing handles a request.
+    return res.status(404).json({ error: `Cannot ${target}` });
   }
   yield trace({
     ...route,
@@ -153,7 +152,7 @@ function* respond(args: PipelineArgs, headers: Record<string, string>): Steps<Ha
     return (yield* match.route.handler(ctx)) ?? { status: 200, headers: {}, body: null };
   } catch (err) {
     // The error handler, like app.use((err, req, res, next) => ...).
-    const line = scenario.lines?.errorHandler;
+    const line = lines?.errorHandler;
     const error = toErrorResponse(err);
     yield trace({
       stage: "error",
@@ -161,6 +160,7 @@ function* respond(args: PipelineArgs, headers: Record<string, string>): Steps<Ha
       label: error.message,
       status: "fail",
       code: error.code,
+      cause: err,
       snapshot: { error: { code: error.code, message: error.message }, status: error.status },
       line,
     });

@@ -47,9 +47,50 @@ describe("product-api", () => {
     expect(response(result)).toMatchObject({ status: 404, body: { error: "Product not found" } });
     expect(types(result).slice(-2)).toEqual(["SQL_QUERY", "RESPONSE_SENT"]);
     expect(sqlEvents(result)[0]?.sql?.rowsReturned).toBe(0);
+    // The handler chose this 404 itself, so the error points at the response.
+    const sent = result.events.at(-1);
+    expect(sent?.type).toBe("RESPONSE_SENT");
     expect(result.errors).toEqual([
-      expect.objectContaining({ status: 404, message: "Product not found" }),
+      {
+        status: 404,
+        code: "NOT_FOUND",
+        message: "Product not found",
+        requestId: "r1",
+        eventSeq: sent?.seq,
+      },
     ]);
+  });
+
+  it("DELETE /products/42 gives 404, because no route handles that method", () => {
+    const result = runSimulation({
+      scenario: productApi,
+      requests: [createRequest({ method: "DELETE", path: "/products/42" })],
+    });
+    expect(response(result)).toMatchObject({
+      status: 404,
+      body: { error: "Cannot DELETE /products/42" },
+    });
+    expect(result.events.find((e) => e.type === "ROUTE_NOT_FOUND")?.label).toBe(
+      "No route for DELETE /products/42 (GET exists)",
+    );
+    expect(sqlEvents(result)).toHaveLength(0);
+  });
+
+  it("gives every preset the status it had in V1", () => {
+    const statuses = Object.fromEntries(
+      (productApi.presets ?? []).map((p) => [p.id, response(runPreset(p.id))?.status]),
+    );
+    expect(statuses).toEqual({
+      "get-product": 200,
+      "list-by-category": 200,
+      valid: 201,
+      "missing-field": 400,
+      "invalid-value": 400,
+      "not-found": 404,
+      "no-token": 401,
+      "wrong-role": 403,
+      "duplicate-name": 409,
+    });
   });
 
   it("GET /products/abc gives 400 and no DB event", () => {
@@ -137,7 +178,12 @@ describe("product-api", () => {
       body: { detail: "Key (name)=(Lunar Toaster) already exists." },
     });
     expect(types(result).slice(-3)).toEqual(["SQL_QUERY", "ERROR_HANDLED", "RESPONSE_SENT"]);
-    expect(result.errors[0]).toMatchObject({ status: 409, code: "23505" });
+    // The error points at the failed INSERT, not at the error handler.
+    expect(result.errors[0]).toMatchObject({
+      status: 409,
+      code: "23505",
+      eventSeq: sqlEvents(result)[0]?.seq,
+    });
     expect(result.worldAfter.tables.products).toHaveLength(1000);
   });
 

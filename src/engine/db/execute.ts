@@ -1,4 +1,4 @@
-import { indexDepth, queryDuration } from "./cost";
+import { costTotal, indexDepth, queryCost, type QueryCost } from "./cost";
 import { DbError } from "./errors";
 import type {
   Database,
@@ -18,9 +18,15 @@ import { matches, toClauses, type Clause } from "./where";
 export type QueryResult = {
   rows: Row[];
   stats: QueryStats;
-  duration: number; // virtual ms
+  duration: number; // virtual ms, the sum of the cost parts
+  cost: QueryCost;
   error?: DbError;
 };
+
+function finish(rows: Row[], stats: QueryStats, error?: DbError): QueryResult {
+  const cost = queryCost(stats);
+  return { rows, stats, duration: costTotal(cost), cost, ...(error && { error }) };
+}
 
 // Runs a query against the in-memory tables. Database errors are returned,
 // not thrown, so the caller still gets the work done before the failure.
@@ -41,10 +47,10 @@ export function executeQuery(database: Database, query: Query): QueryResult {
     }
     const rows = run(table, query, stats);
     stats.rowsReturned = rows.length;
-    return { rows, stats, duration: queryDuration(stats) };
+    return finish(rows, stats);
   } catch (err) {
     if (!(err instanceof DbError)) throw err;
-    return { rows: [], stats, duration: queryDuration(stats), error: err };
+    return finish([], stats, err);
   }
 }
 

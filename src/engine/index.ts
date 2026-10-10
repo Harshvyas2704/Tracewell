@@ -1,4 +1,5 @@
 import { createClock } from "./core/clock";
+import { withFixes } from "./core/code";
 import { ENGINE_CONFIG } from "./core/config";
 import { createRecorder } from "./core/recorder";
 import { createRng } from "./core/rng";
@@ -8,13 +9,14 @@ import { createDatabase, snapshotDatabase } from "./db/database";
 import { requestPipeline } from "./http/pipeline";
 import { computeMetrics } from "./metrics";
 
-export { lineOf, scenarioCode } from "./core/code";
+export { lineOf, scenarioCode, withFixes } from "./core/code";
 export { COST_CONFIG, ENGINE_CONFIG } from "./core/config";
 export { delay, log, trace } from "./core/effects";
 export type * from "./core/types";
 export type { Rng } from "./core/rng";
 export { db } from "./db/effects";
 export { DbError, isDbError } from "./db/errors";
+export type { QueryCost } from "./db/cost";
 export type * from "./db/types";
 export { fakeJwt, requireAuth } from "./http/auth";
 export { HttpError } from "./http/errors";
@@ -37,7 +39,7 @@ export function runSimulation(input: SimulationInput): SimulationResult {
   const clock = createClock(req.startAt);
   const recorder = createRecorder();
   // A fresh database per run: one simulation never leaks into the next.
-  const database = createDatabase(scenario.world ?? []);
+  const database = createDatabase(withFixes(scenario.world, fixes) ?? []);
   const rng = createRng(seed);
   const outcome = runRequest({
     requestId: req.id,

@@ -1,4 +1,4 @@
-import type { Row, TableDef } from "../../engine";
+import type { Fixes, Row, TableDef } from "../../engine";
 
 export const USER_COUNT = 20;
 export const ORDERS_PER_USER = 50;
@@ -54,7 +54,7 @@ const orders = buildOrders();
 
 // Indexes exist on primary keys only. Nothing indexes orders.user_id or
 // order_items.order_id, so every lookup by those columns reads the whole table.
-export const world: TableDef[] = [
+const tables: TableDef[] = [
   {
     name: "users",
     columns: [
@@ -89,3 +89,11 @@ export const world: TableDef[] = [
     rows: buildOrderItems(orders),
   },
 ];
+
+// The same tables and rows, plus the index the "indexOrderItems" fix creates.
+const tablesWithIndex: TableDef[] = tables.map((table) =>
+  table.name === "order_items" ? { ...table, indexes: ["order_id"] } : table,
+);
+
+export const world = (fixes: Fixes): TableDef[] =>
+  fixes.indexOrderItems ? tablesWithIndex : tables;
